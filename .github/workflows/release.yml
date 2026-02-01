@@ -19,10 +19,16 @@ jobs:
       matrix:
         include:
           - os: windows-2022
+            arch: x86_64
+          - os: windows-2022
+            arch: arm64
+            target: aarch64-pc-windows-msvc
           - os: ubuntu-22.04
+            arch: x86_64
           - os: ubuntu-22.04-arm
             arch: arm64
           - os: macos-14
+            arch: universal
 
     steps:
       - name: Checkout
@@ -35,6 +41,10 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Add Windows ARM target
+        if: runner.os == 'Windows' && matrix.target
+        run: rustup target add ${{ matrix.target }}
 
       - name: Add macOS targets
         if: runner.os == 'macOS'
@@ -88,8 +98,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
-          key: ${{ runner.os }}-${{ runner.arch }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: ${{ runner.os }}-${{ runner.arch }}-pnpm-store-
+          key: ${{ runner.os }}-${{ matrix.arch || runner.arch }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.arch || runner.arch }}-pnpm-store-
 
       - name: Install frontend deps
         run: pnpm install --frozen-lockfile
@@ -156,7 +166,15 @@ jobs:
 
       - name: Build Tauri App (Windows)
         if: runner.os == 'Windows'
-        run: pnpm tauri build
+        shell: pwsh
+        env:
+          TAURI_TARGET: ${{ matrix.target }}
+        run: |
+          if ($env:TAURI_TARGET) {
+            pnpm tauri build --target $env:TAURI_TARGET
+          } else {
+            pnpm tauri build
+          }
 
       - name: Build Tauri App (Linux)
         if: runner.os == 'Linux'
@@ -204,18 +222,37 @@ jobs:
       - name: Prepare Windows Assets
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          MATRIX_ARCH: ${{ matrix.arch }}
+          TAURI_TARGET: ${{ matrix.target }}
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path release-assets | Out-Null
           $VERSION = $env:GITHUB_REF_NAME  # e.g., v3.5.0
+          $ARCH = $env:MATRIX_ARCH
+          if ([string]::IsNullOrWhiteSpace($ARCH)) { $ARCH = 'x86_64' }
+          $TARGET = $env:TAURI_TARGET
+          $nameSuffix = if ($ARCH -eq 'arm64' -or $ARCH -eq 'aarch64') { "Windows-arm64" } else { "Windows" }
           # 仅打包 MSI 安装器 + .sig（用于 Updater）
-          $msi = Get-ChildItem -Path 'src-tauri/target/release/bundle/msi' -Recurse -Include *.msi -ErrorAction SilentlyContinue | Select-Object -First 1
+          $msiSearchRoots = @()
+          if ($TARGET) {
+            $msiSearchRoots += "src-tauri/target/$TARGET/release/bundle/msi"
+            $msiSearchRoots += "src-tauri/target/$TARGET/release/bundle"
+          }
+          $msiSearchRoots += "src-tauri/target/release/bundle/msi"
+          $msiSearchRoots += "src-tauri/target/release/bundle"
+          $msi = $null
+          foreach ($root in $msiSearchRoots) {
+            if ($null -eq $msi) {
+              $msi = Get-ChildItem -Path $root -Recurse -Include *.msi -ErrorAction SilentlyContinue | Select-Object -First 1
+            }
+          }
           if ($null -eq $msi) {
             # 兜底：全局搜索 .msi
-            $msi = Get-ChildItem -Path 'src-tauri/target/release/bundle' -Recurse -Include *.msi -ErrorAction SilentlyContinue | Select-Object -First 1
+            $msi = Get-ChildItem -Path 'src-tauri/target' -Recurse -Include *.msi -ErrorAction SilentlyContinue | Select-Object -First 1
           }
           if ($null -ne $msi) {
-            $dest = "CC-Switch-$VERSION-Windows.msi"
+            $dest = "CC-Switch-$VERSION-$nameSuffix.msi"
             Copy-Item $msi.FullName (Join-Path release-assets $dest)
             Write-Host "Installer copied: $dest"
             $sigPath = "$($msi.FullName).sig"
@@ -229,7 +266,11 @@ jobs:
             Write-Warning 'No Windows MSI installer found'
           }
           # 绿色版（portable）：仅可执行文件打 zip（不参与 Updater）
-          $exeCandidates = @(
+          $exeCandidates = @()
+          if ($TARGET) {
+            $exeCandidates += "src-tauri/target/$TARGET/release/cc-switch.exe"
+          }
+          $exeCandidates += @(
             'src-tauri/target/release/cc-switch.exe',
             'src-tauri/target/x86_64-pc-windows-msvc/release/cc-switch.exe'
           )
@@ -244,10 +285,10 @@ jobs:
               'portable=true'
             )
             $portableContent | Set-Content -Path $portableIniPath -Encoding UTF8
-            $portableZip = "release-assets/CC-Switch-$VERSION-Windows-Portable.zip"
+            $portableZip = "release-assets/CC-Switch-$VERSION-$nameSuffix-Portable.zip"
             Compress-Archive -Path "$portableDir/*" -DestinationPath $portableZip -Force
             Remove-Item -Recurse -Force $portableDir
-            Write-Host "Windows portable zip created: CC-Switch-$VERSION-Windows-Portable.zip"
+            Write-Host "Windows portable zip created: CC-Switch-$VERSION-$nameSuffix-Portable.zip"
           } else {
             Write-Warning 'Portable exe not found'
           }
@@ -313,7 +354,8 @@ jobs:
             ### 下载
 
             - **macOS**: `CC-Switch-${{ github.ref_name }}-macOS.zip`（解压即用）或 `CC-Switch-${{ github.ref_name }}-macOS.tar.gz`（Homebrew）
-            - **Windows**: `CC-Switch-${{ github.ref_name }}-Windows.msi`（安装版）或 `CC-Switch-${{ github.ref_name }}-Windows-Portable.zip`（绿色版）
+            - **Windows (x86_64)**: `CC-Switch-${{ github.ref_name }}-Windows.msi`（安装版）或 `CC-Switch-${{ github.ref_name }}-Windows-Portable.zip`（绿色版）
+            - **Windows (ARM64)**: `CC-Switch-${{ github.ref_name }}-Windows-arm64.msi`（安装版）或 `CC-Switch-${{ github.ref_name }}-Windows-arm64-Portable.zip`（绿色版）
             - **Linux (x86_64)**: `CC-Switch-${{ github.ref_name }}-Linux-x86_64.AppImage` / `.deb` / `.rpm`
             - **Linux (ARM64)**: `CC-Switch-${{ github.ref_name }}-Linux-arm64.AppImage` / `.deb` / `.rpm`
 
@@ -363,6 +405,7 @@ jobs:
           # 初始化空平台映射
           mac_url=""; mac_sig=""
           win_url=""; win_sig=""
+          win_arm_url=""; win_arm_sig=""
           linux_x64_url=""; linux_x64_sig=""
           linux_arm64_url=""; linux_arm64_sig=""
           shopt -s nullglob
@@ -375,6 +418,10 @@ jobs:
               *.tar.gz)
                 # 视为 macOS updater artifact
                 mac_url="$url"; mac_sig="$sig_content";;
+              *-Windows-arm64.msi|*-Windows-arm64.exe)
+                win_arm_url="$url"; win_arm_sig="$sig_content";;
+              *-Windows-x86_64.msi|*-Windows-x86_64.exe)
+                win_url="$url"; win_sig="$sig_content";;
               *-Linux-arm64.AppImage|*-Linux-arm64.appimage)
                 linux_arm64_url="$url"; linux_arm64_sig="$sig_content";;
               *-Linux-x86_64.AppImage|*-Linux-x86_64.appimage)
@@ -403,6 +450,11 @@ jobs:
             if [ -n "$win_url" ] && [ -n "$win_sig" ]; then
               [ $first -eq 0 ] && echo ','
               echo "    \"windows-x86_64\": {\"signature\": \"$win_sig\", \"url\": \"$win_url\"}"
+              first=0
+            fi
+            if [ -n "$win_arm_url" ] && [ -n "$win_arm_sig" ]; then
+              [ $first -eq 0 ] && echo ','
+              echo "    \"windows-aarch64\": {\"signature\": \"$win_arm_sig\", \"url\": \"$win_arm_url\"}"
               first=0
             fi
             if [ -n "$linux_x64_url" ] && [ -n "$linux_x64_sig" ]; then
