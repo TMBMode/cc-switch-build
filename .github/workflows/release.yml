@@ -16,16 +16,8 @@ jobs:
       matrix:
         include:
           - os: windows-2022
-            arch: x86_64
-          - os: windows-2022
             arch: arm64
             target: aarch64-pc-windows-msvc
-          - os: ubuntu-22.04
-            arch: x86_64
-          - os: ubuntu-22.04-arm
-            arch: arm64
-          - os: macos-14
-            arch: universal
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,6 +33,11 @@ jobs:
       - name: Add Windows ARM target
         if: runner.os == 'Windows' && matrix.target
         run: rustup target add ${{ matrix.target }}
+
+      - name: Install LLVM (Windows ARM bindgen)
+        if: runner.os == 'Windows' && matrix.target
+        shell: pwsh
+        run: choco install llvm -y
 
       - name: Add macOS targets
         if: runner.os == 'macOS'
@@ -109,6 +106,7 @@ jobs:
         shell: pwsh
         env:
           TAURI_TARGET: ${{ matrix.target }}
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
         run: |
           if ($env:TAURI_TARGET) {
             pnpm tauri build --target $env:TAURI_TARGET
